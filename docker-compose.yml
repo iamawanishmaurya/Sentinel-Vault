@@ -1,0 +1,68 @@
+name: sentinel-vault
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel}
+      POSTGRES_DB: sentinel
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel"]
+      interval: 3s
+      retries: 20
+
+  hardhat:                       # local Ethereum network (chain id 31337)
+    build: ./contracts
+    ports: ["127.0.0.1:8545:8545"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8545',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]})}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      retries: 30
+
+  deploy:                        # one-shot: deploys DocumentRegistry and writes ABI+address to a shared volume
+    build: ./contracts
+    command: ["npx", "hardhat", "run", "scripts/deploy.js", "--network", "localhost"]
+    environment:
+      HARDHAT_URL: http://hardhat:8545
+      DEPLOY_OUT: /deployments
+    volumes: [deployments:/deployments]
+    depends_on:
+      hardhat: {condition: service_healthy}
+    restart: "no"
+
+  ipfs:                          # optional: docker compose --profile ipfs up
+    image: ipfs/kubo:latest
+    profiles: [ipfs]
+    ports: ["127.0.0.1:5001:5001"]
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://sentinel:${POSTGRES_PASSWORD:-sentinel}@postgres:5432/sentinel
+      RPC_URL: http://hardhat:8545
+      CONTRACT_FILE: /deployments/DocumentRegistry.json
+      STORAGE_DIR: /data/storage
+      JWT_SECRET: ${JWT_SECRET:-}
+      MASTER_KEY: ${MASTER_KEY:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@sentinel-vault.dev}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ChangeMe!Admin123}
+      IPFS_API_URL: ${IPFS_API_URL:-}
+      CORS_ORIGINS: http://localhost:3000
+    volumes: [storage:/data/storage, deployments:/deployments:ro]
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      deploy: {condition: service_completed_successfully}
+
+  frontend:
+    build:
+      context: ./frontend
+      args: {BACKEND_URL: "http://backend:8000"}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [backend]
+
+volumes:
+  pgdata:
+  storage:
+  deployments:
